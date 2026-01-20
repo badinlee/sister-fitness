@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, date
+from datetime import datetime, date, time
 from github import Github
 import io
 import plotly.express as px
@@ -12,13 +12,11 @@ REPO_NAME = "badinlee/sister-fitness"  # <--- UPDATE THIS
 DATA_FILE = "data.csv"
 PROFILE_FILE = "profiles.csv"
 
-# --- Setup Google AI (Vision) ---
+# --- Setup Google AI ---
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-else:
-    st.error("Missing Google API Key in Secrets!")
 
-# --- Helper Functions (Same as before) ---
+# --- GitHub Functions ---
 def get_repo():
     g = Github(st.secrets["GITHUB_TOKEN"])
     return g.get_repo(REPO_NAME)
@@ -40,9 +38,8 @@ def save_csv(df, filename, message):
     except:
         repo.create_file(filename, message, csv_content)
 
-# --- AI Logic ---
+# --- AI Vision Logic ---
 def get_calories_from_photo(image_data):
-    """Sends photo to Gemini AI and asks for calorie estimate"""
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
         prompt = (
@@ -52,21 +49,20 @@ def get_calories_from_photo(image_data):
         )
         response = model.generate_content([prompt, image_data])
         text = response.text.strip()
-        name, cals = text.split('|')
-        return name, int(cals)
-    except Exception as e:
-        return "Could not identify", 0
+        if '|' in text:
+            name, cals = text.split('|')
+            return name, int(cals)
+        return "Unknown Food", 0
+    except:
+        return "Error analyzing", 0
 
 # --- App Layout ---
-st.set_page_config(page_title="SisFit Vision", page_icon="👁️", layout="centered")
-st.title("👁️ Sister Fitness Vision")
+st.set_page_config(page_title="SisFit Memory", page_icon="🧠", layout="centered")
+st.title("🧠 Sister Fitness: Smart Log")
 
 user = st.sidebar.selectbox("User", ["Me", "Sister"])
 df_data = load_csv(DATA_FILE)
 df_profiles = load_csv(PROFILE_FILE)
-
-# (Profile check logic hidden for brevity - assumes profile exists. 
-# If you deleted your profile, run the previous code once to recreate it!)
 
 if not df_profiles.empty:
     user_profile = df_profiles[df_profiles["user"] == user].iloc[0]
@@ -74,75 +70,144 @@ if not df_profiles.empty:
     # --- DASHBOARD METRICS ---
     today_str = datetime.now().strftime("%Y-%m-%d")
     calories_today = 0
-    if not df_data.empty:
-        df_data["date_str"] = pd.to_datetime(df_data["date"]).dt.strftime("%Y-%m-%d")
-        calories_today = df_data[(df_data["user"]==user) & (df_data["date_str"]==today_str)]["calories"].sum()
+    
+    # Filter data for User & Today
+    user_history = df_data[df_data["user"] == user].copy() if not df_data.empty else pd.DataFrame()
+    
+    if not user_history.empty:
+        # Ensure 'date' is datetime compatible
+        user_history["dt"] = pd.to_datetime(user_history["date"])
+        todays_logs = user_history[user_history["dt"].dt.strftime("%Y-%m-%d") == today_str]
+        calories_today = todays_logs["calories"].sum()
     
     goal = int(user_profile["calorie_target"])
-    col1, col2 = st.columns(2)
-    col1.metric("Today's Calories", int(calories_today), f"Goal: {goal}")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Today's Cals", int(calories_today))
     col2.metric("Remaining", goal - int(calories_today))
+    col3.metric("Current Weight", f"{user_history.iloc[-1]['weight']}kg" if not user_history.empty else "--")
 
-    # --- MAIN TABS ---
+    # --- TABS ---
     st.divider()
-    tab1, tab2, tab3 = st.tabs(["📸 Snap Food", "📝 Text Log", "📊 History"])
+    tab1, tab2, tab3, tab4 = st.tabs(["⭐ Favorites", "📸 AI Camera", "📝 Manual Log", "📊 History"])
 
-    # --- TAB 1: AI CAMERA ---
+    # --- SHARED INPUT FIELDS HELPERS ---
+    # We use these to standardize the input form across tabs
+    meal_options = ["Breakfast", "Lunch", "Dinner", "Snack"]
+    current_hour = datetime.now().time()
+    
+    # --- TAB 1: FAVORITES (MEMORY) ---
     with tab1:
-        st.subheader("AI Calorie Scanner")
+        st.subheader("Quick Add from History")
+        if not user_history.empty:
+            # Get unique food names from history (excluding weights)
+            # We filter out entries with 0 calories (usually weight check-ins)
+            past_meals = user_history[user_history["calories"] > 0]["notes"].unique()
+            
+            # Dropdown to select a past meal
+            selected_meal = st.selectbox("Select a recent meal:", ["-- Choose --"] + list(past_meals))
+            
+            if selected_meal != "-- Choose --":
+                # Find the last time you ate this to get the calories
+                last_entry = user_history[user_history["notes"] == selected_meal].iloc[-1]
+                saved_cals = int(last_entry["calories"])
+                
+                st.info(f"Memory: You last logged **{selected_meal}** as **{saved_cals} calories**.")
+                
+                with st.form("fav_add"):
+                    # Auto-filled fields
+                    f_name = st.text_input("Meal Name", value=selected_meal)
+                    f_cals = st.number_input("Calories", value=saved_cals)
+                    f_type = st.selectbox("Meal Type", meal_options)
+                    f_time = st.time_input("Time Eaten", value=current_hour)
+                    
+                    if st.form_submit_button("Add to Log"):
+                        # Combine Today's Date + Selected Time
+                        log_dt = datetime.combine(date.today(), f_time)
+                        
+                        new_entry = {
+                            "date": log_dt.strftime("%Y-%m-%d %H:%M"),
+                            "user": user,
+                            "weight": user_history.iloc[-1]["weight"],
+                            "calories": f_cals,
+                            "notes": f_name,
+                            "meal_type": f_type
+                        }
+                        updated_data = pd.concat([df_data, pd.DataFrame([new_entry])], ignore_index=True)
+                        save_csv(updated_data, DATA_FILE, f"Added favorite: {f_name}")
+                        st.success("Logged!")
+                        st.rerun()
+        else:
+            st.info("No history yet! Log some meals manually or with AI first.")
+
+    # --- TAB 2: AI CAMERA ---
+    with tab2:
+        st.subheader("Snap & Log")
         enable_cam = st.checkbox("Open Camera")
-        
         img_file_buffer = None
         if enable_cam:
-            img_file_buffer = st.camera_input("Take a picture of your meal")
+            img_file_buffer = st.camera_input("Take a picture")
 
         if img_file_buffer is not None:
-            # Show the "Analyzing" spinner
-            with st.spinner("🤖 AI is looking at your food..."):
-                # Convert to format AI needs
+            with st.spinner("Analyzing..."):
                 image = Image.open(img_file_buffer)
                 food_name, food_cals = get_calories_from_photo(image)
             
-            if food_cals > 0:
-                st.success(f"I found: **{food_name}** (~{food_cals} cals)")
+            st.success(f"Detected: {food_name} (~{food_cals} cals)")
+            
+            with st.form("ai_confirm"):
+                a_name = st.text_input("Name", value=food_name)
+                a_cals = st.number_input("Calories", value=food_cals)
+                a_type = st.selectbox("Meal Type", meal_options, index=1) # Default to Lunch
+                a_time = st.time_input("Time Eaten", value=current_hour)
                 
-                # Verify before adding
-                with st.form("confirm_ai"):
-                    final_name = st.text_input("Food Name", value=food_name)
-                    final_cals = st.number_input("Calories", value=food_cals)
-                    if st.form_submit_button("✅ Add to Log"):
-                        new_entry = {
-                            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            "user": user,
-                            "weight": df_data[df_data["user"]==user].iloc[-1]["weight"] if not df_data.empty else user_profile["start_weight"],
-                            "calories": final_cals,
-                            "notes": f"📸 {final_name}"
-                        }
-                        updated_data = pd.concat([df_data, pd.DataFrame([new_entry])], ignore_index=True)
-                        save_csv(updated_data, DATA_FILE, f"AI Log: {final_name}")
-                        st.success("Logged!")
-                        st.rerun()
-            else:
-                st.error("Couldn't identify food. Try entering manually in the Text Log tab.")
+                if st.form_submit_button("✅ Add Log"):
+                    log_dt = datetime.combine(date.today(), a_time)
+                    new_entry = {
+                        "date": log_dt.strftime("%Y-%m-%d %H:%M"),
+                        "user": user,
+                        "weight": user_history.iloc[-1]["weight"] if not user_history.empty else 70,
+                        "calories": a_cals,
+                        "notes": a_name,
+                        "meal_type": a_type
+                    }
+                    updated_data = pd.concat([df_data, pd.DataFrame([new_entry])], ignore_index=True)
+                    save_csv(updated_data, DATA_FILE, f"AI Log: {a_name}")
+                    st.rerun()
 
-    # --- TAB 2: MANUAL LOG (Simplified) ---
-    with tab2:
-        with st.form("manual"):
-            txt_desc = st.text_input("Food Name")
-            txt_cals = st.number_input("Calories", min_value=0)
-            if st.form_submit_button("Add"):
+    # --- TAB 3: MANUAL LOG ---
+    with tab3:
+        with st.form("manual_log"):
+            m_name = st.text_input("Food Description")
+            m_cals = st.number_input("Calories", min_value=0, step=10)
+            m_type = st.selectbox("Meal Type", meal_options)
+            m_time = st.time_input("Time Eaten", value=current_hour)
+            
+            if st.form_submit_button("Add Entry"):
+                log_dt = datetime.combine(date.today(), m_time)
                 new_entry = {
-                    "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "date": log_dt.strftime("%Y-%m-%d %H:%M"),
                     "user": user,
-                    "weight": 70, # Placeholder
-                    "calories": txt_cals,
-                    "notes": txt_desc
+                    "weight": user_history.iloc[-1]["weight"] if not user_history.empty else 70,
+                    "calories": m_cals,
+                    "notes": m_name,
+                    "meal_type": m_type
                 }
                 updated_data = pd.concat([df_data, pd.DataFrame([new_entry])], ignore_index=True)
                 save_csv(updated_data, DATA_FILE, "Manual Log")
                 st.rerun()
 
-    # --- TAB 3: HISTORY ---
-    with tab3:
-        if not df_data.empty:
-            st.dataframe(df_data[df_data["user"]==user].tail(10))
+    # --- TAB 4: HISTORY ---
+    with tab4:
+        if not user_history.empty:
+            st.write("Recent Activity")
+            # Show table with new columns
+            display_cols = ["date", "meal_type", "notes", "calories"]
+            # Check if meal_type exists (for old data)
+            if "meal_type" not in user_history.columns:
+                user_history["meal_type"] = "Log"
+            
+            st.dataframe(user_history[display_cols].sort_values("date", ascending=False).head(10), hide_index=True)
+            
+            # Simple Chart
+            fig = px.bar(user_history.tail(14), x="date", y="calories", color="meal_type", title="Calories by Meal")
+            st.plotly_chart(fig)
