@@ -1,14 +1,24 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta, date
+from datetime import datetime, date
 from github import Github
 import io
 import plotly.express as px
 
 # --- Configuration ---
-REPO_NAME = "badinlee/sister-fitness"  # <--- UPDATE THIS
+REPO_NAME = "badinlee/sister-fitness"  # <--- UPDATE THIS!
 DATA_FILE = "data.csv"
 PROFILE_FILE = "profiles.csv"
+
+# --- "Mini AI" Food Database (Calories per 1 gram) ---
+FOOD_DB = {
+    "apple": 0.52, "banana": 0.89, "orange": 0.47, "grapes": 0.69,
+    "chicken breast (cooked)": 1.65, "ground beef": 2.50, "salmon": 2.08,
+    "egg (1 large)": 78, "bread (1 slice)": 80, "rice (cooked)": 1.30,
+    "pasta (cooked)": 1.31, "potato (boiled)": 0.87, "oats": 3.89,
+    "milk (1 cup)": 103, "cheese (cheddar)": 4.02, "yogurt": 0.59,
+    "chocolate": 5.46, "pizza (slice)": 266, "burger": 295
+}
 
 # --- GitHub Connection ---
 def get_repo():
@@ -33,138 +43,149 @@ def save_csv(df, filename, message):
         repo.create_file(filename, message, csv_content)
 
 # --- App Logic ---
-st.set_page_config(page_title="SisFit Pro", page_icon="🦋", layout="centered")
-
-st.title("🦋 Sister Fitness Pro")
+st.set_page_config(page_title="SisFit AI", page_icon="🥗", layout="centered")
+st.title("🥗 Sister Fitness: Meal Tracker")
 
 # 1. User Selection
-user = st.sidebar.selectbox("Who is this?", ["Me", "Sister"])
+user = st.sidebar.selectbox("Who is eating?", ["Me", "Sister"])
 
 # 2. Load Data
 df_data = load_csv(DATA_FILE)
 df_profiles = load_csv(PROFILE_FILE)
 
-# Helper: Get current user profile
-user_profile = pd.DataFrame()
-if not df_profiles.empty:
-    user_profile = df_profiles[df_profiles["user"] == user]
+# Get Profile
+if df_profiles.empty:
+    st.error("Please run the previous code once to create your profile!")
+    st.stop()
 
-# --- MODE 1: ONBOARDING (If no profile exists) ---
-if user_profile.empty:
-    st.info(f"Welcome, {user}! Let's set up your goals.")
+user_profile = df_profiles[df_profiles["user"] == user].iloc[0]
+
+# --- DASHBOARD LOGIC ---
+today_str = datetime.now().strftime("%Y-%m-%d")
+
+# Filter data for THIS USER
+user_history = df_data[df_data["user"] == user].copy() if not df_data.empty else pd.DataFrame()
+
+# Calculate TODAY'S Totals
+calories_today = 0
+foods_today = []
+
+if not user_history.empty:
+    # Add a date column string for matching
+    user_history["date_str"] = pd.to_datetime(user_history["date"]).dt.strftime("%Y-%m-%d")
     
-    with st.form("setup_profile"):
-        st.subheader("🎯 Set Your Goals")
-        height = st.number_input("Height (meters, e.g. 1.65)", 1.0, 2.5, 1.65)
-        start_w = st.number_input("Starting Weight (kg)", 0.0, 200.0, 70.0)
-        goal_w = st.number_input("Goal Weight (kg)", 0.0, 200.0, 60.0)
-        goal_date = st.date_input("Target Date")
-        cal_goal = st.number_input("Daily Calorie Goal", 1000, 4000, 1800)
+    # Get just today's rows
+    todays_logs = user_history[user_history["date_str"] == today_str]
+    
+    # Sum up the calories
+    calories_today = todays_logs["calories"].sum()
+    foods_today = todays_logs
+
+# --- TOP METRICS ---
+col1, col2 = st.columns(2)
+goal = int(user_profile["calorie_target"])
+left = goal - calories_today
+
+col1.metric("Calories Eaten", f"{int(calories_today)}", delta=f"{int(calories_today)} today", delta_color="off")
+col2.metric("Calories Left", f"{int(left)}", delta=f"Goal: {goal}", delta_color="normal")
+
+# Progress Bar
+if goal > 0:
+    prog = min(1.0, calories_today / goal)
+    st.progress(prog)
+    if left < 0:
+        st.warning(f"⚠️ You are {abs(left)} calories over your limit!")
+
+# --- SMART FOOD LOGGER ---
+st.divider()
+st.subheader("🍽️ Log a Meal")
+
+tab1, tab2 = st.tabs(["🍎 Smart Search", "✍️ Manual Add"])
+
+# TAB 1: SMART SEARCH
+with tab1:
+    st.write("Search for a food to auto-calculate calories:")
+    
+    # Search box
+    search_term = st.selectbox("Select Food", [""] + list(FOOD_DB.keys()))
+    
+    calc_cals = 0
+    quantity = 0
+    note = ""
+    
+    if search_term:
+        factor = FOOD_DB[search_term]
         
-        if st.form_submit_button("Create Profile"):
-            new_profile = {
-                "user": user,
-                "height": height,
-                "start_weight": start_w,
-                "goal_weight": goal_w,
-                "goal_date": goal_date,
-                "calorie_target": cal_goal
-            }
-            # Append to profiles dataframe
-            updated_profiles = pd.concat([df_profiles, pd.DataFrame([new_profile])], ignore_index=True)
-            with st.spinner("Creating profile..."):
-                save_csv(updated_profiles, PROFILE_FILE, f"Created profile for {user}")
-            st.success("Profile Saved! Refreshing...")
-            st.rerun()
-
-# --- MODE 2: DASHBOARD (If profile exists) ---
-else:
-    # Extract profile vars
-    profile = user_profile.iloc[0]
-    
-    # --- Sidebar: Edit Goals ---
-    with st.sidebar.expander("⚙️ Edit My Goals"):
-        with st.form("edit_goals"):
-            new_goal_w = st.number_input("Goal Weight", value=float(profile["goal_weight"]))
-            new_cal_goal = st.number_input("Calorie Goal", value=int(profile["calorie_target"]))
-            new_date = st.date_input("Target Date", value=pd.to_datetime(profile["goal_date"]))
+        # Logic for "per unit" vs "per gram" items
+        if factor > 10: # Likely a "per unit" item like Egg or Slice of Bread
+            quantity = st.number_input(f"How many {search_term}s?", 1, 10, 1)
+            calc_cals = quantity * factor
+            st.info(f"🧮 {quantity} x {factor} cal = **{int(calc_cals)} calories**")
+            note = f"{quantity} {search_term}"
+        else: # Likely a "per gram" item like Chicken or Apple
+            quantity = st.number_input("How many grams?", 0, 1000, 100)
+            calc_cals = quantity * factor
+            st.info(f"🧮 {quantity}g x {factor} cal/g = **{int(calc_cals)} calories**")
+            note = f"{quantity}g {search_term}"
             
-            if st.form_submit_button("Update Goals"):
-                # Update specific row
-                df_profiles.loc[df_profiles["user"] == user, "goal_weight"] = new_goal_w
-                df_profiles.loc[df_profiles["user"] == user, "calorie_target"] = new_cal_goal
-                df_profiles.loc[df_profiles["user"] == user, "goal_date"] = new_date
-                save_csv(df_profiles, PROFILE_FILE, "Updated goals")
-                st.rerun()
-
-    # --- Daily Logic Check ---
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    user_logs = df_data[df_data["user"] == user].copy() if not df_data.empty else pd.DataFrame()
-    
-    # Check if logged today
-    logged_today = False
-    if not user_logs.empty:
-        user_logs["date_only"] = pd.to_datetime(user_logs["date"]).dt.strftime("%Y-%m-%d")
-        if today_str in user_logs["date_only"].values:
-            logged_today = True
-
-    # --- NOTIFICATIONS ---
-    if not logged_today:
-        st.error("⚠️ You haven't logged yet today! Don't break the streak!")
-    else:
-        st.success("✅ Logged for today. Great job!")
-
-    # --- PROGRESS SECTION ---
-    col1, col2, col3 = st.columns(3)
-    
-    # Weight Stats
-    current_w = user_logs.iloc[-1]["weight"] if not user_logs.empty else profile["start_weight"]
-    to_go = current_w - profile["goal_weight"]
-    
-    col1.metric("Current Weight", f"{current_w} kg", delta=f"{to_go:.1f} kg to go", delta_color="inverse")
-    
-    # Timeline Stats
-    days_left = (pd.to_datetime(profile["goal_date"]).date() - date.today()).days
-    col2.metric("Days Remaining", f"{days_left} days")
-    
-    # Calorie Stats (Last Entry)
-    last_cals = user_logs.iloc[-1]["calories"] if logged_today else 0
-    cal_diff = int(profile["calorie_target"]) - last_cals
-    col3.metric("Calories Left", f"{cal_diff}", delta_color="normal")
-
-    # --- INPUT FORM ---
-    st.divider()
-    st.subheader("📝 Add Today's Entry")
-    with st.form("daily_entry"):
-        w_input = st.number_input("Weight (kg)", value=float(current_w))
-        c_input = st.number_input("Calories Eaten", value=0)
-        notes = st.text_input("Notes (e.g. 'Ate pizza', 'Went for run')")
-        
-        if st.form_submit_button("Save Log"):
-            entry = {
+        if st.button("Add Smart Food"):
+            new_entry = {
                 "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "user": user,
-                "weight": w_input,
-                "calories": c_input,
-                "notes": notes
+                "weight": user_history.iloc[-1]["weight"] if not user_history.empty else user_profile["start_weight"], # Carry over last weight
+                "calories": int(calc_cals),
+                "notes": note
             }
-            # Add to data
-            updated_data = pd.concat([df_data, pd.DataFrame([entry])], ignore_index=True)
-            save_csv(updated_data, DATA_FILE, "New Daily Log")
+            # Save
+            updated_data = pd.concat([df_data, pd.DataFrame([new_entry])], ignore_index=True)
+            with st.spinner("Adding to log..."):
+                save_csv(updated_data, DATA_FILE, f"Added {note}")
+            st.success("Added!")
             st.rerun()
 
-    # --- CHARTS ---
-    st.divider()
-    if not user_logs.empty:
-        tab1, tab2 = st.tabs(["📉 Weight Trend", "🍎 Calorie History"])
+# TAB 2: MANUAL ADD
+with tab2:
+    with st.form("manual_add"):
+        m_desc = st.text_input("Food Description (e.g. 'Sandwich')")
+        m_cals = st.number_input("Calories", 0, 2000, 0)
         
-        with tab1:
-            fig = px.line(user_logs, x="date", y="weight", markers=True, title="Weight Journey")
-            # Add a horizontal line for the goal
-            fig.add_hline(y=profile["goal_weight"], line_dash="dash", line_color="green", annotation_text="Goal")
-            st.plotly_chart(fig)
-            
-        with tab2:
-            fig2 = px.bar(user_logs, x="date", y="calories", title="Daily Intake")
-            fig2.add_hline(y=profile["calorie_target"], line_color="red", annotation_text="Limit")
-            st.plotly_chart(fig2)
+        if st.form_submit_button("Add Manual Entry"):
+            new_entry = {
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "user": user,
+                "weight": user_history.iloc[-1]["weight"] if not user_history.empty else user_profile["start_weight"],
+                "calories": m_cals,
+                "notes": m_desc
+            }
+            updated_data = pd.concat([df_data, pd.DataFrame([new_entry])], ignore_index=True)
+            save_csv(updated_data, DATA_FILE, "Manual Log")
+            st.rerun()
+
+# --- TODAY'S LOG ---
+st.divider()
+st.subheader(f"📅 Today's Menu ({today_str})")
+
+if not foods_today.empty:
+    # Show a clean table of just food and calories
+    display_table = foods_today[["notes", "calories", "date"]].copy()
+    # Format the time nicely
+    display_table["time"] = pd.to_datetime(display_table["date"]).dt.strftime("%H:%M")
+    st.dataframe(display_table[["time", "notes", "calories"]], hide_index=True, use_container_width=True)
+else:
+    st.caption("Nothing logged yet today.")
+
+# --- WEIGHT LOGGING (Moved to bottom) ---
+with st.expander("⚖️ Log Weight Check-in"):
+    with st.form("weight_in"):
+        w = st.number_input("Current Weight", value=float(user_profile["start_weight"]))
+        if st.form_submit_button("Update Weight"):
+             new_entry = {
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "user": user,
+                "weight": w,
+                "calories": 0, # Weight entry has 0 calories
+                "notes": "Weight Check-in"
+            }
+             updated_data = pd.concat([df_data, pd.DataFrame([new_entry])], ignore_index=True)
+             save_csv(updated_data, DATA_FILE, "Weight Update")
+             st.rerun()
