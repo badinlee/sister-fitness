@@ -1,93 +1,90 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+from github import Github
+import io
 
 # --- Configuration ---
-# Simple goals for demonstration
+REPO_NAME = "badinlee/sister-fitness"  # Make sure this matches your username/repo exactly
+FILE_PATH = "data.csv"
 GOALS = {
     "Me": {"target_weight": 65.0, "daily_calories": 1800},
     "Sister": {"target_weight": 60.0, "daily_calories": 1600}
 }
 
-# --- 1. The Setup ---
-st.set_page_config(page_title="SisFit AI Tracker", page_icon="💪")
+# --- GitHub Connection Functions ---
+def get_github_repo():
+    # This grabs the token we saved in Streamlit Secrets
+    g = Github(st.secrets["GITHUB_TOKEN"])
+    return g.get_repo(REPO_NAME)
 
+def load_data():
+    try:
+        repo = get_github_repo()
+        # Try to get the file
+        contents = repo.get_contents(FILE_PATH)
+        return pd.read_csv(io.StringIO(contents.decoded_content.decode()))
+    except:
+        # If file doesn't exist yet, return empty database
+        return pd.DataFrame(columns=["date", "user", "weight", "calories"])
+
+def save_data(new_entry):
+    repo = get_github_repo()
+    df = load_data()
+    
+    # Add new entry
+    new_df = pd.concat([df, pd.DataFrame([new_entry])], ignore_index=True)
+    
+    # Convert to CSV string
+    csv_content = new_df.to_csv(index=False)
+    
+    try:
+        # If file exists, update it
+        contents = repo.get_contents(FILE_PATH)
+        repo.update_file(contents.path, "New entry", csv_content, contents.sha)
+    except:
+        # If file doesn't exist, create it
+        repo.create_file(FILE_PATH, "First entry", csv_content)
+
+# --- App Layout ---
+st.set_page_config(page_title="SisFit AI Tracker", page_icon="💪")
 st.title("💪 Sister Fitness & AI Tracker")
 
-# Select who is using the app
+# Select User
 user = st.selectbox("Who is checking in?", ["Me", "Sister"])
 
-# --- 2. Input Section ---
+# --- Input Form ---
 st.header(f"Good Morning, {user}! ☀️")
-
 with st.form("daily_entry"):
-    # Weight Input
     current_weight = st.number_input("Current Weight (kg)", min_value=0.0, format="%.1f")
-    
-    # Food Input
     calories_eaten = st.number_input("Calories Eaten Today", min_value=0)
-    
-    # Submit button
     submitted = st.form_submit_button("Save Entry")
 
     if submitted:
-        # In a real app, we would save this to a database/Google Sheet
-        # For now, we save it to the session so we can see it work immediately
         entry = {
-            "date": datetime.now().strftime("%Y-%m-%d"),
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "user": user,
             "weight": current_weight,
             "calories": calories_eaten
         }
-        if "data" not in st.session_state:
-            st.session_state["data"] = []
-        st.session_state["data"].append(entry)
-        st.success("Saved! Great job checking in.")
+        with st.spinner("Saving to the cloud..."):
+            save_data(entry)
+        st.success("Saved! Your sister can see this now.")
 
-# --- 3. Dashboard & History ---
+# --- Dashboard ---
 st.divider()
 st.header("📊 Progress Report")
 
-if "data" in st.session_state and st.session_state["data"]:
-    # Convert list to a nice table
-    df = pd.DataFrame(st.session_state["data"])
-    
-    # Filter for the current user
+# Load fresh data
+df = load_data()
+
+if not df.empty:
+    # Show stats
     user_data = df[df["user"] == user]
-    
     if not user_data.empty:
-        st.dataframe(user_data)
-
-        # Simple Chart
         st.line_chart(user_data, x="date", y="weight")
+        st.dataframe(user_data.tail(5)) # Show last 5 entries
     else:
-        st.info("No data for you yet. Add an entry above!")
+        st.info("No data for you yet.")
 else:
-    st.write("No entries yet.")
-
-# --- 4. The AI Coach Logic ---
-st.divider()
-st.header("🤖 AI Coach Feedback")
-
-if submitted:
-    target = GOALS[user]["target_weight"]
-    cal_limit = GOALS[user]["daily_calories"]
-    
-    # Simple Logic (This is where we could plug in ChatGPT later)
-    advice = ""
-    
-    # Weight check
-    if current_weight > target:
-        diff = current_weight - target
-        advice += f"You are {diff:.1f}kg away from your goal. "
-    elif current_weight <= target:
-        advice += "You hit your weight goal! Amazing! 🎉 "
-        
-    # Calorie check
-    if calories_eaten > cal_limit:
-        advice += f"\n\n⚠️ You went over your calorie limit by {calories_eaten - cal_limit}. Try a lighter dinner tonight."
-    elif calories_eaten > 0:
-        advice += f"\n\n✅ You are within your calorie budget. Keep it up!"
-        
-
-    st.info(advice)
+    st.write("Start by adding your first entry above!")
