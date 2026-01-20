@@ -57,18 +57,30 @@ def save_csv(df, filename, message):
     except:
         repo.create_file(filename, message, csv_content)
 
-# --- FIXED AI LOGIC ---
+# --- ROBUST AI LOGIC (Classic Model Fallback) ---
 def get_ai_response(prompt, image=None):
+    """Attempts to use Gemini Pro (Classic) which is most stable."""
     try:
-        # We strictly use the current standard model
-        model = genai.GenerativeModel('gemini-1.5-flash')
         if image:
+            # Use the classic vision model
+            model = genai.GenerativeModel('gemini-pro-vision')
             response = model.generate_content([prompt, image])
         else:
+            # Use the classic text model
+            model = genai.GenerativeModel('gemini-pro')
             response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"Connection Error: {str(e)}"
+        return f"Error: {str(e)}"
+
+def calculate_calories_from_grams(food_name, grams):
+    prompt = f"How many calories are in {grams} grams of {food_name}? Return ONLY the integer number. Do not write text."
+    res = get_ai_response(prompt)
+    # Clean up response to get just the number
+    clean_res = ''.join(filter(str.isdigit, res))
+    if clean_res:
+        return int(clean_res)
+    return 0
 
 def analyze_image(image_data):
     prompt = (
@@ -173,7 +185,26 @@ else:
 
     # --- TAB 1: LOGGING ---
     with t_add:
-        # Quick Buttons
+        # 1. GRAM CALCULATOR (New Feature!)
+        with st.expander("⚖️ Gram Calculator (Watties etc)", expanded=True):
+            col_g1, col_g2, col_g3 = st.columns([2,1,1])
+            calc_food = col_g1.text_input("Food (e.g. Baked Beans)", placeholder="Watties Baked Beans")
+            calc_grams = col_g2.number_input("Grams", 0, 1000, 100)
+            
+            if col_g3.button("Calculate"):
+                with st.spinner("Calculating..."):
+                    calc_res = calculate_calories_from_grams(calc_food, calc_grams)
+                if calc_res > 0:
+                    st.success(f"**{calc_res} Calories** in {calc_grams}g of {calc_food}")
+                    # Save to session state to auto-fill form below
+                    st.session_state['auto_name'] = f"{calc_grams}g {calc_food}"
+                    st.session_state['auto_cals'] = calc_res
+                else:
+                    st.error("Could not calculate. Check AI connection.")
+
+        st.divider()
+
+        # 2. QUICK BUTTONS
         st.caption("⚡ Quick Add")
         g1, g2 = st.columns(2)
         for i, item in enumerate(full_menu):
@@ -191,29 +222,35 @@ else:
                     st.rerun()
 
         st.divider()
-        st.caption("📸 Scan or Manual")
+        st.caption("📸 Scanner")
         
         # Camera
         cam_input = st.camera_input("Take Photo")
-        ai_name, ai_cals = "", 0
-        
         if cam_input:
             with st.spinner("Analyzing..."):
                 img = Image.open(cam_input)
                 ai_name, ai_cals = analyze_image(img)
             if "Error" in ai_name:
-                st.error("Scanner Error. Try typing manually.")
+                st.error("Scanner Error.")
             else:
                 st.success(f"Found: {ai_name} ({ai_cals})")
+                st.session_state['auto_name'] = ai_name
+                st.session_state['auto_cals'] = ai_cals
 
-        # Unified Form
+        st.divider()
+        st.caption("✍️ Confirm Entry")
+        
+        # Unified Form - checks session state for auto-filled values
+        default_name = st.session_state.get('auto_name', "")
+        default_cals = st.session_state.get('auto_cals', 0)
+
         with st.form("entry_form"):
-            f_name = st.text_input("Food Name", value=ai_name)
-            f_cals = st.number_input("Calories", value=int(ai_cals))
+            f_name = st.text_input("Food Name", value=default_name)
+            f_cals = st.number_input("Calories", value=int(default_cals))
             f_type = st.selectbox("Meal", ["Breakfast", "Lunch", "Dinner", "Snack"])
             f_save = st.checkbox("Save to 'Quick Add'?")
             
-            if st.form_submit_button("✅ Save", use_container_width=True):
+            if st.form_submit_button("✅ Save Log", use_container_width=True):
                 new_entry = {
                     "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     "user": user, "weight": latest_weight, 
@@ -227,66 +264,54 @@ else:
                     updated_menu = pd.concat([df_menu, pd.DataFrame([new_menu])], ignore_index=True)
                     save_csv(updated_menu, MENU_FILE, "Menu Update")
                 
+                # Clear session state
+                if 'auto_name' in st.session_state: del st.session_state['auto_name']
+                if 'auto_cals' in st.session_state: del st.session_state['auto_cals']
+                
                 st.toast("Saved!")
                 time_lib.sleep(0.5)
                 st.rerun()
 
-    # --- TAB 2: BEAUTIFUL DIARY (NEW DESIGN) ---
+    # --- TAB 2: DIARY ---
     with t_diary:
         if not user_history.empty:
-            # Get unique days sorted newest first
-            # We use the 'nice_date' (e.g. Tue 20 Jan) for display, 'dt' for sorting
             days_df = user_history.sort_values("dt", ascending=False).drop_duplicates(subset=["nice_date"])
             unique_days = days_df["nice_date"].tolist()
             
             for day_str in unique_days:
-                # Filter for this day
                 day_data = user_history[user_history["nice_date"] == day_str]
                 day_total = day_data["calories"].sum()
                 day_rem = goal - day_total
                 
-                # --- DAY CARD ---
                 with st.container(border=True):
-                    # Header
-                    d_c1, d_c2 = st.columns([2, 1])
-                    d_c1.subheader(day_str)
-                    
-                    # Daily Summary
-                    st.markdown(f"**Total:** {int(day_total)} | **Left:** {int(day_rem)}")
-                    st.progress(min(1.0, day_total / goal) if goal > 0 else 0)
+                    st.subheader(day_str)
+                    # Summary Line
+                    c_sum1, c_sum2 = st.columns(2)
+                    c_sum1.metric("Used", f"{int(day_total)}")
+                    c_sum2.metric("Remaining", f"{int(day_rem)}", delta_color="normal" if day_rem > 0 else "inverse")
                     
                     st.divider()
                     
-                    # Meals Breakdown
+                    # Meals
                     for m in ["Breakfast", "Lunch", "Dinner", "Snack"]:
                         m_data = day_data[day_data["meal_type"] == m]
                         if not m_data.empty:
-                            # Meal Header
-                            m_total = m_data["calories"].sum()
-                            st.markdown(f"**{m}** <span style='color:gray; font-size:0.9em'>({int(m_total)} cals)</span>", unsafe_allow_html=True)
-                            
-                            # Items
+                            st.write(f"**{m}**")
                             for _, r in m_data.iterrows():
-                                i_c1, i_c2 = st.columns([3, 1])
-                                i_c1.caption(f"• {r['notes']}")
-                                i_c2.caption(f"{int(r['calories'])}")
-                            st.markdown("") # Spacer
+                                c_a, c_b = st.columns([3, 1])
+                                c_a.caption(f"{r['notes']}")
+                                c_b.caption(f"{int(r['calories'])}")
+                            st.markdown("")
 
         else:
-            st.info("No logs yet. Go to 'Log Food' to add your first meal!")
+            st.info("No logs yet.")
             
-        # Edit History Button at bottom of Diary
         with st.expander("⚙️ Edit / Delete Entries"):
             if not user_history.empty:
                 ed_df = st.data_editor(user_history[["date", "calories", "notes", "meal_type"]], use_container_width=True)
                 if st.button("💾 Save Corrections"):
                     others = df_data[df_data["user"] != user]
                     ed_df["user"] = user
-                    # Reconstruct DataFrame with correct columns
-                    # (We assume weight stays same for edits for simplicity in this view)
-                    # Merge edited fields back to main data logic would be complex, 
-                    # so we just save the edits directly.
-                    # Note: Simplified for robustness.
                     ed_df["weight"] = latest_weight 
                     final = pd.concat([others, ed_df], ignore_index=True)
                     save_csv(final, DATA_FILE, "Edited")
