@@ -89,4 +89,5 @@ if submitted:
     elif calories_eaten > 0:
         advice += f"\n\n✅ You are within your calorie budget. Keep it up!"
         
+
     st.info(advice)
