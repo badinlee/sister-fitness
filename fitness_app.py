@@ -57,9 +57,8 @@ def save_csv(df, filename, message):
     except:
         repo.create_file(filename, message, csv_content)
 
-# --- ROBUST AI LOGIC ---
+# --- AI Logic ---
 def get_ai_response(prompt, image=None):
-    """Attempts to use Gemini Pro (Classic) which is most stable."""
     try:
         if image:
             model = genai.GenerativeModel('gemini-1.5-flash')
@@ -69,7 +68,7 @@ def get_ai_response(prompt, image=None):
             response = model.generate_content(prompt)
         return response.text
     except:
-        # Fallback to Pro
+        # Fallback
         try:
             if image:
                 model = genai.GenerativeModel('gemini-pro-vision')
@@ -82,7 +81,6 @@ def get_ai_response(prompt, image=None):
             return f"Error: {str(e)}"
 
 def identify_food_density(query, image=None):
-    """Finds the calories per 100g for a brand/food."""
     prompt = (
         f"Identify the food '{query}' (or from image). "
         "Find the approximate Calories per 100g (or 100ml) for this specific brand/item. "
@@ -93,14 +91,9 @@ def identify_food_density(query, image=None):
     res = get_ai_response(prompt, image).strip()
     if '|' in res:
         parts = res.split('|')
-        # Cleanup numbers
         cals_100 = ''.join(filter(str.isdigit, parts[1]))
         return parts[0], int(cals_100) if cals_100 else 0
     return "Unknown", 0
-
-def ask_ai_chef(query, calories_left, ingredients):
-    prompt = f"I have {calories_left} cals left. Ingredients: {ingredients}. Query: '{query}'. Suggest recipe."
-    return get_ai_response(prompt)
 
 # --- App Layout ---
 st.set_page_config(page_title="SisFit", page_icon="🦋", layout="centered", initial_sidebar_state="collapsed")
@@ -130,7 +123,16 @@ if not df_data.empty:
 user_profile_data = df_profiles[df_profiles["user"] == user] if not df_profiles.empty else pd.DataFrame()
 if user_profile_data.empty:
     st.info("Please create a profile.")
-    # (Profile creation code hidden for brevity - same as before)
+    with st.form("create_profile"):
+        h = st.number_input("Height (m)", 1.0, 2.5, 1.65)
+        sw = st.number_input("Starting Weight (kg)", 40.0, 200.0, 70.0)
+        gw = st.number_input("Goal Weight (kg)", 40.0, 200.0, 60.0)
+        ct = st.number_input("Daily Calories", 1000, 4000, 1650)
+        if st.form_submit_button("Start Journey"):
+            new_prof = {"user": user, "height": h, "start_weight": sw, "goal_weight": gw, "calorie_target": ct}
+            updated_profs = pd.concat([df_profiles, pd.DataFrame([new_prof])], ignore_index=True)
+            save_csv(updated_profs, PROFILE_FILE, "Created profile")
+            st.rerun()
 else:
     user_profile = user_profile_data.iloc[0]
     
@@ -139,7 +141,6 @@ else:
     today_str_nz = today_obj.strftime("%d/%m/%Y")
     today_str_iso = today_obj.strftime("%Y-%m-%d")
     
-    # Stats
     calories_today = 0
     latest_weight = user_profile["start_weight"]
     
@@ -163,11 +164,11 @@ else:
     m3.metric("Kg", f"{latest_weight}")
     
     # Tabs
-    t_add, t_diary, t_shop, t_chef = st.tabs(["➕ Log Food", "📅 Diary", "🛒 List", "👨‍🍳 Chef"])
+    t_add, t_diary, t_edit, t_shop = st.tabs(["➕ Log Food", "📅 Diary", "✏️ Edit/Fix", "🛒 List"])
 
-    # --- TAB 1: LOGGING (MyFitnessPal Style) ---
+    # --- TAB 1: LOGGING ---
     with t_add:
-        # SECTION A: QUICK BUTTONS
+        # QUICK BUTTONS
         with st.expander("⚡ Quick Menu", expanded=False):
             g1, g2 = st.columns(2)
             for i, item in enumerate(full_menu):
@@ -187,36 +188,29 @@ else:
         st.divider()
         st.write("### 🔎 Search & Weigh")
         
-        # 1. SEARCH / SCAN
         col_scan, col_search = st.columns([1, 2])
         cam_input = col_scan.camera_input("Scan")
         search_query = col_search.text_input("Or Type Food (e.g. Watties Beans)")
         
-        # Session state for calculator
         if 'calc_name' not in st.session_state: st.session_state['calc_name'] = ""
         if 'calc_density' not in st.session_state: st.session_state['calc_density'] = 0
         
-        # TRIGGER AI
+        # Trigger Search
         if cam_input or (search_query and st.button("Search")):
             with st.spinner("Finding Nutrition Info..."):
                 img = Image.open(cam_input) if cam_input else None
                 txt = search_query if search_query else "Food image"
-                
                 f_name, f_density = identify_food_density(txt, img)
-                
                 st.session_state['calc_name'] = f_name
                 st.session_state['calc_density'] = f_density
 
-        # 2. THE CALCULATOR (If food found)
+        # Calculator
         if st.session_state['calc_density'] > 0:
-            st.info(f"**Found:** {st.session_state['calc_name']}")
-            st.caption(f"Energy: Approx {st.session_state['calc_density']} calories per 100g")
+            st.success(f"**Found:** {st.session_state['calc_name']} (~{st.session_state['calc_density']} cals/100g)")
             
             with st.form("gram_calc"):
-                grams = st.number_input("How many grams did you have?", 0, 1000, 100, step=10)
+                grams = st.number_input("How many grams?", 0, 2000, 100, step=10)
                 meal_type = st.selectbox("Meal", ["Breakfast", "Lunch", "Dinner", "Snack"])
-                
-                # Auto Calculate
                 total_cals = int((grams / 100) * st.session_state['calc_density'])
                 st.write(f"### = {total_cals} Calories")
                 
@@ -237,7 +231,6 @@ else:
                         updated_menu = pd.concat([df_menu, pd.DataFrame([new_menu])], ignore_index=True)
                         save_csv(updated_menu, MENU_FILE, "Menu Update")
 
-                    # Reset
                     st.session_state['calc_density'] = 0
                     st.toast("Saved!")
                     time_lib.sleep(0.5)
@@ -255,15 +248,12 @@ else:
                 day_rem = goal - day_total
                 
                 with st.container(border=True):
-                    # Header Line
                     c_d1, c_d2 = st.columns([2,1])
                     c_d1.subheader(day_str)
                     
-                    # Totals
                     st.markdown(f"**Used:** {int(day_total)} | **Left:** {int(day_rem)}")
                     st.divider()
                     
-                    # Meals
                     for m in ["Breakfast", "Lunch", "Dinner", "Snack"]:
                         m_data = day_data[day_data["meal_type"] == m]
                         if not m_data.empty:
@@ -271,25 +261,40 @@ else:
                             for _, r in m_data.iterrows():
                                 c_a, c_b = st.columns([4, 1])
                                 c_a.write(f"{r['notes']}")
-                                c_b.write(f"{int(r['calories'])}")
-        else:
-            st.info("No logs yet.")
+                                c_b.write(f"**{int(r['calories'])}**")
 
-    # --- TAB 3: SHOPPING ---
+    # --- TAB 3: EASY EDIT (New!) ---
+    with t_edit:
+        st.subheader("✏️ Fix Mistakes")
+        st.info("Tap any cell below to change the number. Then click Save.")
+        
+        if not user_history.empty:
+            # Full screen editor
+            edited_df = st.data_editor(
+                user_history[["date", "calories", "notes", "meal_type"]].sort_values("date", ascending=False),
+                num_rows="dynamic",
+                use_container_width=True,
+                height=500 # Taller editor
+            )
+            
+            if st.button("💾 Save All Corrections", use_container_width=True):
+                # Re-merge logic
+                others = df_data[df_data["user"] != user]
+                edited_df["user"] = user
+                edited_df["weight"] = latest_weight
+                
+                final_df = pd.concat([others, edited_df], ignore_index=True)
+                save_csv(final_df, DATA_FILE, "Bulk Edit")
+                st.toast("✅ Corrections Saved!")
+                time_lib.sleep(1)
+                st.rerun()
+        else:
+            st.write("No history to edit yet.")
+
+    # --- TAB 4: SHOPPING ---
     with t_shop:
         st.write("### 🛒 Shopping List")
         for cat, items in SHOPPING_LIST.items():
             with st.expander(cat):
                 for i in items:
                     st.checkbox(i, key=i)
-
-    # --- TAB 4: CHEF ---
-    with t_chef:
-        st.write("### 👨‍🍳 AI Chef")
-        c_q = st.text_input("Ask Chef:")
-        if st.button("Ask"):
-            ings = ", ".join([x for l in SHOPPING_LIST.values() for x in l])
-            left = goal - int(calories_today)
-            with st.spinner("Thinking..."):
-                ans = ask_ai_chef(c_q, left, ings)
-            st.info(ans)
