@@ -2,3 +2,4 @@ streamlit
 pandas
 PyGithub
 plotly
+google-generativeai
