@@ -68,6 +68,7 @@ def get_ai_response(prompt, image=None):
             response = model.generate_content(prompt)
         return response.text
     except:
+        # Fallback to Pro
         try:
             if image:
                 model = genai.GenerativeModel('gemini-pro-vision')
@@ -146,20 +147,22 @@ else:
     user_history = df_data[df_data["user"] == user].copy() if not df_data.empty else pd.DataFrame()
     if not user_history.empty:
         user_history["dt"] = pd.to_datetime(user_history["date"])
-        user_history["nz_date_str"] = user_history["dt"].dt.strftime("%d/%m/%Y") 
-        user_history["nice_date"] = user_history["dt"].dt.strftime("%a %d %b")
+        # Nice display date e.g. "Tue 20 Jan"
+        user_history["display_date"] = user_history["dt"].dt.strftime("%a %d %b")
+        user_history["iso_date"] = user_history["dt"].dt.strftime("%Y-%m-%d")
         
-        todays_logs = user_history[user_history["dt"].dt.strftime("%Y-%m-%d") == today_str_iso]
+        todays_logs = user_history[user_history["iso_date"] == today_str_iso]
         calories_today = todays_logs["calories"].sum()
         latest_weight = user_history.iloc[-1]['weight']
     
     goal = int(user_profile["calorie_target"])
     
-    # Hero Stats
+    # Hero Stats (Always Visible)
     st.markdown("---")
     m1, m2, m3 = st.columns(3)
     m1.metric("Today", int(calories_today))
-    m2.metric("Left", goal - int(calories_today))
+    rem_today = goal - int(calories_today)
+    m2.metric("Left", rem_today, delta_color="normal" if rem_today > 0 else "inverse")
     m3.metric("Kg", f"{latest_weight}")
     
     # Tabs
@@ -235,88 +238,102 @@ else:
                     time_lib.sleep(0.5)
                     st.rerun()
 
-    # --- TAB 2: DIARY WITH EDITING ---
+    # --- TAB 2: CLEAN DIARY & EDITOR ---
     with t_diary:
+        st.subheader("📅 Daily Journal")
+        
+        # 1. Date Picker (Focus Mode)
+        col_d1, col_d2 = st.columns([2, 1])
+        with col_d1:
+            # Default to today
+            sel_date = st.date_input("View Date", value=datetime.now())
+        
+        # Filter Data for Selected Date
+        sel_date_iso = sel_date.strftime("%Y-%m-%d")
+        sel_display = sel_date.strftime("%A %d %B") # e.g. Tuesday 20 January
+        
         if not user_history.empty:
-            days_df = user_history.sort_values("dt", ascending=False).drop_duplicates(subset=["nice_date"])
-            unique_days = days_df["nice_date"].tolist()
+            day_data = user_history[user_history["iso_date"] == sel_date_iso]
             
-            for day_str in unique_days:
-                # Get data for this specific day
-                day_mask = user_history["nice_date"] == day_str
-                day_data = user_history[day_mask]
+            # 2. Big Summary Card
+            with st.container(border=True):
+                st.markdown(f"### {sel_display}")
                 
-                day_total = day_data["calories"].sum()
-                day_rem = goal - day_total
+                d_total = day_data["calories"].sum() if not day_data.empty else 0
+                d_rem = goal - d_total
                 
-                # Expandable card for the day
-                with st.expander(f"{day_str}  (Used: {int(day_total)} | Left: {int(day_rem)})", expanded=(day_str == days_df.iloc[0]["nice_date"])):
+                md1, md2 = st.columns(2)
+                md1.metric("Calories Used", int(d_total))
+                md2.metric("Remaining", int(d_rem), delta_color="normal" if d_rem > 0 else "inverse")
+                
+                # Visual Bar
+                prog = min(1.0, d_total / goal) if goal > 0 else 0
+                st.progress(prog)
+                
+            st.divider()
+            
+            # 3. Editable Table (Clean)
+            if not day_data.empty:
+                st.info("💡 Tip: Edit any number below and click 'Update Diary'")
+                
+                # We show a clean editor for just this day
+                edited_day = st.data_editor(
+                    day_data[["meal_type", "notes", "calories"]],
+                    column_config={
+                        "meal_type": st.column_config.SelectboxColumn("Meal", options=["Breakfast", "Lunch", "Dinner", "Snack"], width="small"),
+                        "notes": st.column_config.TextColumn("Food Item", width="large"),
+                        "calories": st.column_config.NumberColumn("Cals", width="small")
+                    },
+                    use_container_width=True,
+                    num_rows="dynamic",
+                    key="day_editor"
+                )
+                
+                if st.button(f"🔄 Update Diary for {sel_display}", type="primary"):
+                    # Logic to replace just this day's data
+                    # 1. Get ALL data except this user's current day
+                    full_df = load_csv(DATA_FILE)
                     
-                    # EDITABLE TABLE
-                    st.caption("📝 Edit any row below and click Save")
+                    # Add temp helper columns for robust filtering
+                    full_df["temp_dt"] = pd.to_datetime(full_df["date"])
+                    full_df["temp_iso"] = full_df["temp_dt"].dt.strftime("%Y-%m-%d")
                     
-                    # We create a mini-editor just for this day
-                    edited_day = st.data_editor(
-                        day_data[["notes", "calories", "meal_type"]],
-                        key=f"editor_{day_str}",
-                        use_container_width=True,
-                        num_rows="dynamic" # Allows adding/deleting rows
-                    )
+                    # Keep everything that ISN'T (User + Selected Date)
+                    keep_mask = ~((full_df["user"] == user) & (full_df["temp_iso"] == sel_date_iso))
+                    data_to_keep = full_df[keep_mask].drop(columns=["temp_dt", "temp_iso"])
                     
-                    # Save Button for this day
-                    if st.button(f"💾 Save Changes for {day_str}", key=f"save_{day_str}"):
-                        # 1. Drop old rows for this day from main history
-                        # We use the index to identify which rows to replace
-                        # Note: This requires the indices to match.
-                        
-                        # Simpler approach: Filter out this day from main DF, then append new edited rows
-                        # We need to preserve the 'date', 'user', 'weight' from the original rows
-                        
-                        # Get original rows to keep metadata (like user/date)
-                        original_meta = day_data.iloc[0]
-                        fixed_date = original_meta["date"]
-                        fixed_weight = original_meta["weight"]
-                        
-                        # Create new rows from editor
-                        new_rows_list = []
-                        for idx, row in edited_day.iterrows():
-                            new_rows_list.append({
-                                "date": fixed_date,
-                                "user": user,
-                                "weight": fixed_weight,
-                                "calories": row["calories"],
-                                "notes": row["notes"],
-                                "meal_type": row["meal_type"]
-                            })
-                        
-                        # Remove OLD day data
-                        # We filter by the nice_date string to be safe
-                        # First, we need the indices of the original df that match this day
-                        # (A bit tricky in pandas with duplicate dates, so we exclude by date string)
-                        
-                        # Re-load full data to be safe
-                        current_full_data = load_csv(DATA_FILE)
-                        # Add helper column
-                        current_full_data["dt_temp"] = pd.to_datetime(current_full_data["date"])
-                        current_full_data["nice_date_temp"] = current_full_data["dt_temp"].dt.strftime("%a %d %b")
-                        
-                        # Filter OUT this user AND this day
-                        mask_keep = ~((current_full_data["user"] == user) & (current_full_data["nice_date_temp"] == day_str))
-                        data_to_keep = current_full_data[mask_keep].drop(columns=["dt_temp", "nice_date_temp"])
-                        
-                        # Create DataFrame for NEW rows
-                        if new_rows_list:
-                            new_day_df = pd.DataFrame(new_rows_list)
-                            final_df = pd.concat([data_to_keep, new_day_df], ignore_index=True)
-                        else:
-                            final_df = data_to_keep # If all rows deleted
-                        
-                        save_csv(final_df, DATA_FILE, f"Edited {day_str}")
-                        st.toast("✅ Diary Updated!")
-                        time_lib.sleep(1)
-                        st.rerun()
+                    # 2. Build new rows from editor
+                    # We need to grab the original timestamp and weight from the first row of day_data
+                    # or default to noon today if it was empty (but we are in the 'not empty' block)
+                    base_ts = day_data.iloc[0]["date"]
+                    base_w = day_data.iloc[0]["weight"]
+                    
+                    new_rows = []
+                    for idx, row in edited_day.iterrows():
+                        new_rows.append({
+                            "date": base_ts, # Keep original timestamp
+                            "user": user,
+                            "weight": base_w,
+                            "calories": row["calories"],
+                            "notes": row["notes"],
+                            "meal_type": row["meal_type"]
+                        })
+                    
+                    # 3. Combine and Save
+                    new_day_df = pd.DataFrame(new_rows)
+                    final_df = pd.concat([data_to_keep, new_day_df], ignore_index=True)
+                    
+                    save_csv(final_df, DATA_FILE, f"Updated {sel_date_iso}")
+                    st.toast("✅ Diary Updated Successfully!")
+                    time_lib.sleep(1)
+                    st.rerun()
+                    
+            else:
+                st.write("No meals logged for this date.")
+        else:
+            st.write("No history available.")
 
-    # --- TAB 3: TRENDS & SUGGESTIONS ---
+    # --- TAB 3: TRENDS ---
     with t_trends:
         st.subheader("📊 Trends")
         if not user_history.empty:
@@ -325,35 +342,33 @@ else:
             st.plotly_chart(fig, use_container_width=True)
             
             # 2. Suggestions
-            st.subheader("💡 Suggestions")
+            st.subheader("💡 Analysis")
             
             # Avg Calories
-            avg_cals = user_history.groupby("nice_date")["calories"].sum().mean()
+            avg_cals = user_history.groupby("iso_date")["calories"].sum().mean()
             diff = goal - avg_cals
             
             if diff > 300:
-                st.info(f"You are averaging **{int(avg_cals)}** calories. You are under-eating by ~{int(diff)}. Try adding a bigger snack (e.g., Yogurt & Nuts) in the afternoon.")
+                st.info(f"Week Average: **{int(avg_cals)}** cals. You are under-eating by ~{int(diff)}. Try adding a bigger snack.")
             elif diff < -100:
-                st.warning(f"You are averaging **{int(avg_cals)}** calories. You are slightly over goal. Watch the portion sizes on Dinner.")
+                st.warning(f"Week Average: **{int(avg_cals)}** cals. You are slightly over goal.")
             else:
-                st.success("🎉 You are hitting your calorie targets perfectly!")
-            
-            # Leaderboard (if sister exists)
+                st.success("🎉 You are consistently hitting your calorie targets!")
+
+            # Leaderboard
             st.subheader("🏆 Leaderboard")
             all_users = df_data["user"].unique()
-            if len(all_users) > 1:
-                scores = []
-                for u in all_users:
-                    u_hist = df_data[df_data["user"] == u]
-                    if not u_hist.empty:
-                        start = u_hist.iloc[0]["weight"]
-                        curr = u_hist.iloc[-1]["weight"]
-                        loss = start - curr
-                        loss_pct = (loss/start)*100
-                        scores.append({"User": u, "Loss %": f"{loss_pct:.1f}%", "Kg Lost": f"{loss:.1f}"})
+            scores = []
+            for u in all_users:
+                u_hist = df_data[df_data["user"] == u]
+                if not u_hist.empty:
+                    start = u_hist.iloc[0]["weight"]
+                    curr = u_hist.iloc[-1]["weight"]
+                    loss = start - curr
+                    loss_pct = (loss/start)*100
+                    scores.append({"User": u, "Loss %": f"{loss_pct:.1f}%", "Kg Lost": f"{loss:.1f}"})
+            if scores:
                 st.dataframe(pd.DataFrame(scores), hide_index=True)
-            else:
-                st.caption("Get your sister to log data to see the leaderboard!")
 
     # --- TAB 4: SHOPPING ---
     with t_shop:
