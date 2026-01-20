@@ -56,10 +56,11 @@ def save_csv(df, filename, message):
     except:
         repo.create_file(filename, message, csv_content)
 
-# --- AI Logic ---
+# --- AI Logic (FIXED MODEL NAME) ---
 def analyze_image(image_data):
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        # We use the standard 'gemini-1.5-flash' which is the current stable vision model
+        model = genai.GenerativeModel('gemini-1.5-flash')
         prompt = (
             "Analyze this image. It might be food, a barcode, or a nutrition label. "
             "Return ONLY a string: 'Food Name|Calories'. Example: 'Oat Bar|180'. "
@@ -76,7 +77,8 @@ def analyze_image(image_data):
 
 def ask_ai_chef(query, calories_left, ingredients):
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        # We use the standard 'gemini-1.5-flash' here too
+        model = genai.GenerativeModel('gemini-1.5-flash')
         prompt = f"""
         I have {calories_left} calories left. 
         My ingredients: {ingredients}.
@@ -140,13 +142,20 @@ else:
     user_profile = user_profile_data.iloc[0]
     
     # Dashboard Metrics
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    # NZ DATE FORMAT HERE (DD/MM/YYYY)
+    today_obj = datetime.now()
+    today_str = today_obj.strftime("%d/%m/%Y") # <--- NZ Format
+    
     calories_today = 0
     user_history = df_data[df_data["user"] == user].copy() if not df_data.empty else pd.DataFrame()
     
     if not user_history.empty:
+        # Convert all dates to Objects first
         user_history["dt"] = pd.to_datetime(user_history["date"])
-        todays_logs = user_history[user_history["dt"].dt.strftime("%Y-%m-%d") == today_str]
+        # Create a formatted string column for comparison
+        user_history["day_str"] = user_history["dt"].dt.strftime("%d/%m/%Y")
+        
+        todays_logs = user_history[user_history["day_str"] == today_str]
         calories_today = todays_logs["calories"].sum()
         latest_weight = user_history.iloc[-1]['weight']
     else:
@@ -241,7 +250,7 @@ else:
     with tab_diary:
         st.subheader("📅 Your Food Diary")
         if not user_history.empty:
-            user_history["day_str"] = user_history["dt"].dt.strftime("%Y-%m-%d")
+            # Use the NZ Format column created earlier
             unique_days = sorted(user_history["day_str"].unique(), reverse=True)
             for day in unique_days:
                 day_data = user_history[user_history["day_str"] == day]
