@@ -5,7 +5,7 @@ from github import Github
 import io
 
 # --- Configuration ---
-REPO_NAME = "badinlee/sister-fitness"  # Make sure this matches your username/repo exactly
+REPO_NAME = "badinlee/sister-fitness"
 FILE_PATH = "data.csv"
 GOALS = {
     "Me": {"target_weight": 65.0, "daily_calories": 1800},
@@ -88,3 +88,4 @@ if not df.empty:
         st.info("No data for you yet.")
 else:
     st.write("Start by adding your first entry above!")
+
