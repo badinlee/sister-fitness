@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, date, time, timedelta
+from datetime import datetime, date, time
 from github import Github
 import io
 import plotly.express as px
@@ -57,7 +57,7 @@ def save_csv(df, filename, message):
     except:
         repo.create_file(filename, message, csv_content)
 
-# --- ADVANCED AI LOGIC ---
+# --- AI Logic ---
 def get_ai_response(prompt, image=None):
     try:
         if image:
@@ -68,6 +68,7 @@ def get_ai_response(prompt, image=None):
             response = model.generate_content(prompt)
         return response.text
     except:
+        # Fallback
         try:
             if image:
                 model = genai.GenerativeModel('gemini-pro-vision')
@@ -81,20 +82,19 @@ def get_ai_response(prompt, image=None):
 
 def search_brands_nz(query):
     """
-    Asks AI to return 3 common NZ brands for a generic food.
-    Returns a list of dicts: [{'brand': 'Farrahs', 'unit': 'Wrap', 'cals': 180, 'type': 'item'}, ...]
+    Returns common NZ brands for a food query.
     """
     prompt = (
         f"The user is searching for '{query}' in New Zealand. "
         "Identify 3-4 most common NZ brands/varieties for this. "
-        "For each, give the Calories per SINGLE ITEM (if it's a wrap/cookie) OR per 100g (if it's butter/yoghurt). "
+        "For each, give the Calories per SINGLE ITEM (if it's a wrap/cookie) OR per 100g/100ml (if it's butter/yoghurt/milk). "
         "Return ONLY a string in this format with pipe separators: "
-        "'Brand Name|UnitType(e.g. 1 Wrap or 100g)|Calories|CalcType(item OR gram)' "
+        "'Brand Name|UnitType|Calories|CalcType(item OR gram)' "
         "Example output: "
-        "'Farrahs Garlic|1 Wrap|216|item\n"
-        "Rebel Spinach|1 Wrap|134|item\n"
-        "Giannis|1 Wrap|180|item' "
-        "If the food is generic (like Apple), just return one line: 'Generic Apple|1 Medium|80|item'."
+        "'Anchor Blue Standard|100ml|63|gram\n"
+        "Anchor Lite|100ml|46|gram\n"
+        "Anchor Calci+|100ml|50|gram' "
+        "Make sure the calorie counts are accurate for NZ products."
     )
     res = get_ai_response(prompt).strip()
     
@@ -113,7 +113,6 @@ def search_brands_nz(query):
     return brands
 
 def analyze_image_for_search(image):
-    """Just identifies the food name from image so we can search brands."""
     prompt = "Identify this food item. Return ONLY the generic name (e.g. 'Garlic Wrap' or 'Strawberry Yoghurt')."
     return get_ai_response(prompt, image).strip()
 
@@ -145,13 +144,12 @@ if not df_data.empty:
 user_profile_data = df_profiles[df_profiles["user"] == user] if not df_profiles.empty else pd.DataFrame()
 if user_profile_data.empty:
     st.info("Please create a profile.")
-    # (Profile creation hidden for brevity)
+    # (Profile code omitted for brevity)
 else:
     user_profile = user_profile_data.iloc[0]
     
     # Dates
     today_obj = datetime.now()
-    today_str_nz = today_obj.strftime("%d/%m/%Y")
     today_str_iso = today_obj.strftime("%Y-%m-%d")
     
     calories_today = 0
@@ -200,118 +198,114 @@ else:
                         st.rerun()
 
         st.divider()
-        st.write("### 🔎 Search NZ Brands")
-        
-        # --- STATE MANAGEMENT ---
+        st.write("### 🔎 Search & Scan")
+
+        # --- CAMERA TOGGLE LOGIC ---
         if 'show_camera' not in st.session_state: st.session_state['show_camera'] = False
-        if 'search_results' not in st.session_state: st.session_state['search_results'] = []
-        if 'selected_food' not in st.session_state: st.session_state['selected_food'] = None
+        if 'search_term' not in st.session_state: st.session_state['search_term'] = ""
+        if 'brand_results' not in st.session_state: st.session_state['brand_results'] = []
+        if 'selected_brand' not in st.session_state: st.session_state['selected_brand'] = None
 
-        # 1. SEARCH INPUTS
-        col_txt, col_cam = st.columns([4, 1])
-        with col_txt:
-            search_query = st.text_input("Type Food (e.g. Garlic Wrap)", key="search_box", label_visibility="collapsed", placeholder="Type food...")
-        with col_cam:
-            if st.button("📷"):
-                st.session_state['show_camera'] = True
+        # Top Bar: Search Input & Camera Button
+        c_search, c_cam = st.columns([4, 1])
+        with c_search:
+            # TEXT INPUT that triggers search on Enter
+            query_input = st.text_input("Search Food (e.g. Anchor Milk)", value=st.session_state['search_term'], placeholder="Type brand or food...", label_visibility="collapsed")
+        with c_cam:
+            if st.button("📷", use_container_width=True):
+                st.session_state['show_camera'] = not st.session_state['show_camera']
+                st.rerun()
 
-        # 2. CAMERA FRAME (Conditional)
+        # CAMERA ZONE (Only if toggled)
         if st.session_state['show_camera']:
             with st.container(border=True):
-                col_x1, col_x2 = st.columns([4, 1])
-                col_x1.write("📸 Snap Photo")
-                if col_x2.button("❌"):
+                col_h1, col_h2 = st.columns([4,1])
+                col_h1.caption("📸 Snap a photo to identify")
+                if col_h2.button("❌", key="close_cam"):
                     st.session_state['show_camera'] = False
                     st.rerun()
                 
-                cam_img = st.camera_input("Scan Food")
-                if cam_img:
+                cam_pic = st.camera_input("Scan", label_visibility="collapsed")
+                if cam_pic:
                     with st.spinner("Identifying..."):
-                        img = Image.open(cam_img)
-                        detected_name = analyze_image_for_search(img)
-                        # Auto-trigger search with detected name
-                        st.session_state['show_camera'] = False # Close camera
-                        search_query = detected_name # Pass to search
-                        # We force the search logic below to run by simulating a submit
-                        st.session_state['force_search'] = detected_name
+                        img = Image.open(cam_pic)
+                        detected = analyze_image_for_search(img)
+                        st.session_state['search_term'] = detected # Set search term
+                        st.session_state['show_camera'] = False # Close cam
+                        st.rerun() # Rerun to trigger search below
 
-        # 3. PERFORM SEARCH (Text or AI Detected)
-        trigger_search = False
-        if search_query: trigger_search = True
-        if 'force_search' in st.session_state:
-            search_query = st.session_state['force_search']
-            trigger_search = True
-            del st.session_state['force_search']
+        # SEARCH LOGIC (Triggers if text input changes)
+        if query_input and query_input != st.session_state.get('last_query', ''):
+            st.session_state['last_query'] = query_input
+            with st.spinner(f"Finding NZ brands for '{query_input}'..."):
+                results = search_brands_nz(query_input)
+                st.session_state['brand_results'] = results
+                st.session_state['selected_brand'] = None # Reset selection
 
-        if trigger_search:
-            # Only search if we haven't already results for this query
-            # (Simple check to prevent re-running on every refresh)
-            if st.button("Find Brands") or trigger_search: 
-                with st.spinner(f"Looking up NZ brands for '{search_query}'..."):
-                    results = search_brands_nz(search_query)
-                    st.session_state['search_results'] = results
-                    st.session_state['selected_food'] = None # Reset selection
-
-        # 4. SHOW RESULTS (Radio Buttons)
-        if st.session_state['search_results']:
-            st.write("Select Brand:")
+        # BRAND RESULTS
+        if st.session_state['brand_results']:
+            st.caption("👇 Select the exact match:")
             
-            # Format options for display
-            options = {f"{r['name']} ({r['cals']} cal per {r['unit']})": r for r in st.session_state['search_results']}
-            selection = st.radio("Pick one:", list(options.keys()))
+            # Display brands as a clean radio list
+            brand_opts = {f"{b['name']} ({b['cals']} cal/{b['unit']})": b for b in st.session_state['brand_results']}
+            choice = st.radio("Brands", list(brand_opts.keys()), label_visibility="collapsed")
             
             # Store selection
-            st.session_state['selected_food'] = options[selection]
+            st.session_state['selected_brand'] = brand_opts[choice]
 
-        # 5. CALCULATOR (Based on Brand Selection)
-        if st.session_state['selected_food']:
-            food_data = st.session_state['selected_food']
+        # CALCULATOR (Appears when brand selected)
+        if st.session_state['selected_brand']:
+            brand = st.session_state['selected_brand']
             st.divider()
-            st.write(f"**Track: {food_data['name']}**")
             
-            with st.form("track_brand"):
+            with st.form("add_brand_form"):
+                st.write(f"**Adding: {brand['name']}**")
+                
                 final_cals = 0
-                qty_desc = ""
+                desc = ""
                 
-                if food_data['calc'] == 'item':
-                    # It's a wrap/cookie/slice
-                    qty = st.number_input(f"How many {food_data['unit']}s?", 0.5, 10.0, 1.0, step=0.5)
-                    final_cals = int(qty * food_data['cals'])
-                    qty_desc = f"{qty} x {food_data['name']}"
+                # Dynamic Logic: "Item" vs "Gram/ML"
+                if brand['calc'] == 'item':
+                    # Wraps, Cookies, Slices
+                    qty = st.number_input(f"How many {brand['unit']}s?", 0.5, 10.0, 1.0, step=0.5)
+                    final_cals = int(qty * brand['cals'])
+                    desc = f"{qty} x {brand['name']}"
                 else:
-                    # It's gram based (butter/yogurt)
-                    grams = st.number_input("How many grams?", 0, 500, 100, step=10)
-                    # cals is per 100g
-                    final_cals = int((grams / 100) * food_data['cals'])
-                    qty_desc = f"{grams}g {food_data['name']}"
+                    # Butter, Milk, Yoghurt
+                    unit_label = "ml" if "ml" in brand['unit'] else "g"
+                    qty = st.number_input(f"How many {unit_label}?", 0, 1000, 100 if unit_label == 'g' else 250, step=10)
+                    # cals is per 100
+                    final_cals = int((qty / 100) * brand['cals'])
+                    desc = f"{qty}{unit_label} {brand['name']}"
                 
-                st.write(f"### Total: {final_cals} Calories")
+                st.write(f"### = {final_cals} Calories")
                 
                 m_type = st.selectbox("Meal", ["Breakfast", "Lunch", "Dinner", "Snack"])
                 save_q = st.checkbox("Save to Quick Menu")
                 
-                if st.form_submit_button("✅ Add to Diary", type="primary"):
+                if st.form_submit_button("✅ Add Entry", type="primary"):
                     new_entry = {
                         "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
                         "user": user, "weight": latest_weight, 
-                        "calories": final_cals, "notes": qty_desc, "meal_type": m_type
+                        "calories": final_cals, "notes": desc, "meal_type": m_type
                     }
                     updated_data = pd.concat([df_data, pd.DataFrame([new_entry])], ignore_index=True)
                     save_csv(updated_data, DATA_FILE, "Brand Add")
                     
                     if save_q:
-                        new_menu = {"name": food_data['name'], "cals": final_cals, "type": m_type, "desc": qty_desc}
+                        new_menu = {"name": brand['name'], "cals": final_cals, "type": m_type, "desc": desc}
                         updated_menu = pd.concat([df_menu, pd.DataFrame([new_menu])], ignore_index=True)
                         save_csv(updated_menu, MENU_FILE, "Menu Update")
                     
-                    # Cleanup
-                    st.session_state['search_results'] = []
-                    st.session_state['selected_food'] = None
                     st.toast("Saved!")
+                    # Clear search
+                    st.session_state['search_term'] = ""
+                    st.session_state['brand_results'] = []
+                    st.session_state['selected_brand'] = None
                     time_lib.sleep(0.5)
                     st.rerun()
 
-    # --- TAB 2: CLEAN DIARY & EDITOR ---
+    # --- TAB 2: CLEAN DIARY ---
     with t_diary:
         st.subheader("📅 Daily Journal")
         col_d1, col_d2 = st.columns([2, 1])
@@ -373,10 +367,7 @@ else:
             fig = px.line(user_history, x="dt", y="weight", markers=True, title="Weight Progress")
             st.plotly_chart(fig, use_container_width=True)
             avg_cals = user_history.groupby("iso_date")["calories"].sum().mean()
-            diff = goal - avg_cals
-            if diff > 300: st.info(f"Week Avg: {int(avg_cals)}. Under-eating by {int(diff)}.")
-            elif diff < -100: st.warning(f"Week Avg: {int(avg_cals)}. Slightly over goal.")
-            else: st.success("🎉 On track!")
+            st.info(f"Weekly Average: {int(avg_cals)} Calories")
 
     # --- TAB 4: SHOPPING ---
     with t_shop:
