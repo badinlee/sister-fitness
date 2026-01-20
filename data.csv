@@ -1,4 +1,4 @@
-date,user,weight,calories,notes
-2026-01-20 03:33,Me,20.0,50,
-2026-01-20 03:36,Me,100.0,750,
-2026-01-20 03:47,Me,100.0,453,275g chicken breast (cooked)
+date,user,weight,calories,notes,meal_type
+2026-01-20 03:47,Me,100.0,453,275g chicken breast (cooked),
+2026-01-20 03:36,Me,100.0,750,,
+2026-01-20 03:33,Me,100.0,50,,
