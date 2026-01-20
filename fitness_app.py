@@ -6,6 +6,7 @@ import io
 import plotly.express as px
 import google.generativeai as genai
 from PIL import Image
+import time as time_lib
 
 # --- Configuration ---
 REPO_NAME = "badinlee/sister-fitness"  # <--- UPDATE THIS
@@ -56,50 +57,60 @@ def save_csv(df, filename, message):
     except:
         repo.create_file(filename, message, csv_content)
 
-# --- AI Logic (STABLE MODEL) ---
-def analyze_image(image_data):
+# --- ROBUST AI LOGIC (The Fix!) ---
+def get_ai_response(prompt, image=None):
+    """Tries the new model, falls back to old model if it crashes."""
+    
+    # 1. Try the new fast model (Gemini 1.5)
     try:
-        # 'gemini-1.5-flash' is the stable standard model
         model = genai.GenerativeModel('gemini-1.5-flash')
-        prompt = (
-            "Analyze this image. It might be food, a barcode, or a nutrition label. "
-            "Return ONLY a string: 'Food Name|Calories'. Example: 'Oat Bar|180'. "
-            "If unknown, return 'Unknown|0'."
-        )
-        response = model.generate_content([prompt, image_data])
-        text = response.text.strip()
-        if '|' in text:
-            name, cals = text.split('|')
-            return name, int(cals)
-        return "Unknown Item", 0
-    except Exception as e:
-        # Fallback error message
-        return f"Error: {str(e)}", 0
+        if image:
+            response = model.generate_content([prompt, image])
+        else:
+            response = model.generate_content(prompt)
+        return response.text
+    except:
+        # 2. If that fails (404 Error), use the 'Classic' models
+        try:
+            if image:
+                model = genai.GenerativeModel('gemini-pro-vision') # Classic Vision
+                response = model.generate_content([prompt, image])
+            else:
+                model = genai.GenerativeModel('gemini-pro') # Classic Text
+                response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+def analyze_image(image_data):
+    prompt = (
+        "Analyze this image. It might be food, a barcode, or a nutrition label. "
+        "Return ONLY a string: 'Food Name|Calories'. Example: 'Oat Bar|180'. "
+        "If unknown, return 'Unknown|0'."
+    )
+    text = get_ai_response(prompt, image_data).strip()
+    if '|' in text:
+        name, cals = text.split('|')
+        return name, int(cals)
+    return "Unknown Item", 0
 
 def ask_ai_chef(query, calories_left, ingredients):
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        prompt = f"""
-        I have {calories_left} calories left. 
-        My ingredients: {ingredients}.
-        User asks: '{query}'.
-        Suggest a recipe or snack.
-        """
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"Chef Error: {str(e)}"
+    prompt = f"""
+    I have {calories_left} calories left. 
+    My ingredients: {ingredients}.
+    User asks: '{query}'.
+    Suggest a short recipe or snack.
+    """
+    return get_ai_response(prompt)
 
 # --- App Layout ---
 st.set_page_config(page_title="SisFit Mobile", page_icon="🦋", layout="centered", initial_sidebar_state="collapsed")
 
-# 1. TOP NAVIGATION (Mobile Friendly)
-# Instead of Sidebar, we use columns at the top for easy switching
-c1, c2 = st.columns([3, 1])
-with c1:
+# 1. HEADER & USER SWITCHER (Compact)
+col_head_1, col_head_2 = st.columns([3, 1])
+with col_head_1:
     st.title("🦋 SisFit")
-with c2:
-    # Small User Switcher at top right
+with col_head_2:
     user = st.selectbox("User", ["Me", "Sister"], label_visibility="collapsed")
 
 # Load Data
@@ -139,16 +150,16 @@ else:
     # --- MAIN DASHBOARD ---
     user_profile = user_profile_data.iloc[0]
     
-    # NZ Date Format (DD/MM/YYYY)
-    today_str_nz = datetime.now().strftime("%d/%m/%Y")
-    today_str_iso = datetime.now().strftime("%Y-%m-%d") # for filtering
+    # NZ Date Format Logic
+    today_obj = datetime.now()
+    today_str_nz = today_obj.strftime("%d/%m/%Y") # Display format
+    today_str_iso = today_obj.strftime("%Y-%m-%d") # Logic format
     
     calories_today = 0
     user_history = df_data[df_data["user"] == user].copy() if not df_data.empty else pd.DataFrame()
     
     if not user_history.empty:
         user_history["dt"] = pd.to_datetime(user_history["date"])
-        # Filter strictly by ISO date string
         todays_logs = user_history[user_history["dt"].dt.strftime("%Y-%m-%d") == today_str_iso]
         calories_today = todays_logs["calories"].sum()
         latest_weight = user_history.iloc[-1]['weight']
@@ -157,148 +168,141 @@ else:
     
     goal = int(user_profile["calorie_target"])
     
-    # --- METRICS BAR ---
-    # Using a container to make it pop
-    with st.container():
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Today", int(calories_today))
-        remaining = goal - int(calories_today)
-        col2.metric("Left", remaining, delta_color="normal" if remaining > 0 else "inverse")
-        col3.metric("Kg", f"{latest_weight}")
-        st.progress(min(1.0, calories_today / goal) if goal > 0 else 0)
+    # --- HERO METRICS (Big & Clean) ---
+    st.markdown("---")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Today", int(calories_today))
+    rem = goal - int(calories_today)
+    m2.metric("Left", rem, delta_color="normal" if rem > 0 else "inverse")
+    m3.metric("Kg", f"{latest_weight}")
+    
+    # Progress Bar with Color Logic
+    prog = min(1.0, calories_today / goal) if goal > 0 else 0
+    st.progress(prog)
+    if rem < 0:
+        st.caption(f"🚨 You are {abs(rem)} calories over!")
 
-    # --- MAIN TABS ---
-    # We use emojis as tab names to save space on mobile
-    tab_add, tab_diary, tab_list, tab_more = st.tabs(["➕ Log", "📅 Diary", "🛒 List", "⚙️ More"])
+    # --- NAVIGATION TABS ---
+    t_log, t_diary, t_shop, t_tools = st.tabs(["➕ Log", "📅 Diary", "🛒 List", "⚙️ Tools"])
 
-    # --- TAB 1: LOGGING (Mobile Optimized) ---
-    with tab_add:
-        # Toggle between Quick and Manual/Scan
-        mode = st.radio("Mode", ["⚡ Quick Plan", "📸 Scan & Search"], horizontal=True, label_visibility="collapsed")
+    # --- TAB 1: LOG (Mobile Optimized) ---
+    with t_log:
+        st.write("### ⚡ Quick Add")
         
-        if mode == "⚡ Quick Plan":
-            st.caption("Tap to add instantly:")
-            # GRID LAYOUT for buttons
-            grid_cols = st.columns(2)
-            for i, item in enumerate(full_menu):
-                with grid_cols[i % 2]:
-                    # Short label for mobile
-                    if st.button(f"{item['name']}\n({item['cals']})", key=f"btn_{i}", use_container_width=True):
-                        new_entry = {
-                            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            "user": user, "weight": latest_weight, 
-                            "calories": item['cals'], "notes": item['desc'], "meal_type": item['type']
-                        }
-                        updated_data = pd.concat([df_data, pd.DataFrame([new_entry])], ignore_index=True)
-                        save_csv(updated_data, DATA_FILE, "Quick Add")
-                        st.toast(f"✅ Added {item['name']}!") # Toast notification
-                        # No rerun needed, toast is enough feedback usually, but rerun updates stats
-                        time.sleep(1) 
-                        st.rerun()
-
-        else: # Scan & Search Mode
-            st.info("Take a photo OR type a name.")
-            
-            # Unified Input Form
-            with st.form("unified_input"):
-                c_cam, c_txt = st.columns([1, 2])
-                
-                # Camera inside the form logic is tricky in Streamlit, 
-                # so we put the input OUTSIDE and just use the result here.
-                pass 
-            
-            # Camera Input (Must be outside form to trigger reload)
-            img_file = st.camera_input("📸 Camera")
-            
-            # Helper to process image if it exists
-            ai_name, ai_cals = "", 0
-            if img_file:
-                with st.spinner("Analyzing..."):
-                    img = Image.open(img_file)
-                    ai_name, ai_cals = analyze_image(img)
-                if "Error" in ai_name:
-                    st.error(ai_name)
-                else:
-                    st.success(f"Detected: {ai_name} ({ai_cals} cals)")
-            
-            # The Form
-            with st.form("manual_scan_form"):
-                st.write("Confirm Details:")
-                # If AI found something, use it as default value
-                f_name = st.text_input("Food Name", value=ai_name)
-                f_cals = st.number_input("Calories", value=int(ai_cals))
-                f_type = st.selectbox("Meal", ["Breakfast", "Lunch", "Dinner", "Snack"])
-                f_save = st.checkbox("Save to Quick Plan?")
-                
-                if st.form_submit_button("Add Entry", use_container_width=True):
+        # Grid Layout for Buttons
+        g1, g2 = st.columns(2)
+        for i, item in enumerate(full_menu):
+            with (g1 if i % 2 == 0 else g2):
+                if st.button(f"{item['name']}\n({item['cals']})", key=f"q_{i}", use_container_width=True):
                     new_entry = {
                         "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
                         "user": user, "weight": latest_weight, 
-                        "calories": f_cals, "notes": f_name, "meal_type": f_type
+                        "calories": item['cals'], "notes": item['desc'], "meal_type": item['type']
                     }
                     updated_data = pd.concat([df_data, pd.DataFrame([new_entry])], ignore_index=True)
-                    save_csv(updated_data, DATA_FILE, "Entry Added")
-                    
-                    if f_save:
-                        new_menu = {"name": f_name, "cals": f_cals, "type": f_type, "desc": f_name}
-                        updated_menu = pd.concat([df_menu, pd.DataFrame([new_menu])], ignore_index=True)
-                        save_csv(updated_menu, MENU_FILE, "Menu Updated")
-                    
-                    st.toast("✅ Entry Saved!")
+                    save_csv(updated_data, DATA_FILE, "Quick Add")
+                    st.toast(f"✅ Added {item['name']}!")
+                    time_lib.sleep(0.5)
                     st.rerun()
 
-    # --- TAB 2: DIARY (NZ FORMAT) ---
-    with tab_diary:
-        st.subheader("📅 History")
-        if not user_history.empty:
-            # Create NZ Date Strings (DD/MM/YYYY)
-            user_history["nz_date"] = user_history["dt"].dt.strftime("%d/%m/%Y")
-            unique_days = sorted(user_history["nz_date"].unique(), reverse=True)
+        st.divider()
+        st.write("### 📸 Scan & Search")
+        
+        # Camera is separated to prevent reload loops
+        cam_img = st.camera_input("Take Photo")
+        
+        ai_res_name, ai_res_cals = "", 0
+        if cam_img:
+            with st.spinner("🤖 Analyzing..."):
+                img = Image.open(cam_img)
+                ai_res_name, ai_res_cals = analyze_image(img)
             
-            for day in unique_days:
-                day_data = user_history[user_history["nz_date"] == day]
-                total = day_data["calories"].sum()
+            if "Error" in ai_res_name:
+                st.error("AI Connection Failed. Try typing manually below.")
+            else:
+                st.success(f"Found: {ai_res_name}")
+
+        # Unified Form
+        with st.form("entry_form"):
+            f_name = st.text_input("Food Name", value=ai_res_name)
+            f_cals = st.number_input("Calories", value=int(ai_res_cals))
+            f_type = st.selectbox("Meal", ["Breakfast", "Lunch", "Dinner", "Snack"])
+            f_save = st.checkbox("Save to 'Quick Add' list?")
+            
+            if st.form_submit_button("✅ Save Entry", use_container_width=True):
+                new_entry = {
+                    "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "user": user, "weight": latest_weight, 
+                    "calories": f_cals, "notes": f_name, "meal_type": f_type
+                }
+                updated_data = pd.concat([df_data, pd.DataFrame([new_entry])], ignore_index=True)
+                save_csv(updated_data, DATA_FILE, "Manual Entry")
                 
-                # Expandable Day
-                with st.expander(f"{day}  —  {int(total)} cals", expanded=(day == today_str_nz)):
+                if f_save:
+                    new_menu = {"name": f_name, "cals": f_cals, "type": f_type, "desc": f_name}
+                    updated_menu = pd.concat([df_menu, pd.DataFrame([new_menu])], ignore_index=True)
+                    save_csv(updated_menu, MENU_FILE, "Menu Update")
+                
+                st.toast("Saved!")
+                time_lib.sleep(0.5)
+                st.rerun()
+
+    # --- TAB 2: DIARY (NZ DATES) ---
+    with t_diary:
+        st.write("### 📅 History")
+        if not user_history.empty:
+            # Create NZ Date Column for display
+            user_history["nz_date"] = user_history["dt"].dt.strftime("%d/%m/%Y")
+            days = sorted(user_history["nz_date"].unique(), reverse=True)
+            
+            for d in days:
+                d_data = user_history[user_history["nz_date"] == d]
+                total = d_data["calories"].sum()
+                
+                with st.expander(f"{d}  —  {int(total)} cals", expanded=(d==today_str_nz)):
                     for m in ["Breakfast", "Lunch", "Dinner", "Snack"]:
-                        m_data = day_data[day_data["meal_type"] == m]
-                        if not m_data.empty:
+                        m_rows = d_data[d_data["meal_type"] == m]
+                        if not m_rows.empty:
                             st.caption(f"**{m}**")
-                            for _, row in m_data.iterrows():
-                                # Grid for alignment
+                            for _, r in m_rows.iterrows():
                                 c_a, c_b = st.columns([3, 1])
-                                c_a.write(f"{row['notes']}")
-                                c_b.write(f"**{int(row['calories'])}**")
+                                c_a.write(r["notes"])
+                                c_b.write(f"**{int(r['calories'])}**")
                             st.divider()
 
     # --- TAB 3: SHOPPING ---
-    with tab_list:
-        st.subheader("🛒 Shopping")
+    with t_shop:
+        st.write("### 🛒 Shopping List")
         for cat, items in SHOPPING_LIST.items():
-            with st.expander(cat, expanded=False):
+            with st.expander(cat):
                 for i in items:
                     st.checkbox(i, key=i)
 
-    # --- TAB 4: MORE (Chef & Edit) ---
-    with tab_more:
+    # --- TAB 4: TOOLS (Chef + Edit) ---
+    with t_tools:
         st.write("### 👨‍🍳 AI Chef")
-        chef_q = st.text_input("Ask about ingredients:")
+        chef_input = st.text_input("Ask about ingredients:")
         if st.button("Ask Chef", use_container_width=True):
-             ings = ", ".join([i for cat in SHOPPING_LIST.values() for i in cat])
-             left = goal - int(calories_today)
-             with st.spinner("Thinking..."):
-                 ans = ask_ai_chef(chef_q, left, ings)
-             st.info(ans)
-             
+            all_ing = ", ".join([x for l in SHOPPING_LIST.values() for x in l])
+            left = goal - int(calories_today)
+            with st.spinner("Thinking..."):
+                res = ask_ai_chef(chef_input, left, all_ing)
+            st.info(res)
+
         st.divider()
-        st.write("### ✏️ Edit Data")
+        st.write("### ✏️ Edit History")
         if not user_history.empty:
-            edit_df = st.data_editor(user_history[["date", "weight", "calories", "notes", "meal_type"]].sort_values("date", ascending=False), num_rows="dynamic", use_container_width=True)
-            if st.button("💾 Save Edits", use_container_width=True):
-                 others = df_data[df_data["user"] != user]
-                 edit_df["user"] = user
-                 final = pd.concat([others, edit_df], ignore_index=True)
-                 save_csv(final, DATA_FILE, "Edited")
-                 st.toast("✅ Corrections Saved")
-                 st.rerun()
+            # Show simplified editor
+            ed_df = st.data_editor(
+                user_history[["date", "weight", "calories", "notes", "meal_type"]].sort_values("date", ascending=False),
+                num_rows="dynamic",
+                use_container_width=True
+            )
+            if st.button("💾 Save Corrections", use_container_width=True):
+                others = df_data[df_data["user"] != user]
+                ed_df["user"] = user
+                final = pd.concat([others, ed_df], ignore_index=True)
+                save_csv(final, DATA_FILE, "Edited")
+                st.toast("Corrections Saved!")
+                time_lib.sleep(0.5)
+                st.rerun()
