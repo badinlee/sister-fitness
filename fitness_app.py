@@ -25,7 +25,8 @@ def load_csv(filename):
     try:
         repo = get_repo()
         contents = repo.get_contents(filename)
-        return pd.read_csv(io.StringIO(contents.decoded_content.decode()))
+        df = pd.read_csv(io.StringIO(contents.decoded_content.decode()))
+        return df
     except:
         return pd.DataFrame()
 
@@ -38,7 +39,7 @@ def save_csv(df, filename, message):
     except:
         repo.create_file(filename, message, csv_content)
 
-# --- AI Vision Logic (Updated for Barcodes) ---
+# --- AI Vision Logic ---
 def analyze_image(image_data):
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
@@ -47,7 +48,7 @@ def analyze_image(image_data):
             "1. If it's a barcode or nutrition label: Extract the product name and calories per serving. "
             "2. If it's a meal photo: Estimate the calories. "
             "Return ONLY a string in this exact format: 'Food Name|Calories'. "
-            "Example: 'Oat Bar|180'. If unknown, return 'Error|0'."
+            "Example: 'Oat Bar|180'. If unknown, return 'Unknown Item|0'."
         )
         response = model.generate_content([prompt, image_data])
         text = response.text.strip()
@@ -66,6 +67,18 @@ user = st.sidebar.selectbox("User", ["Me", "Sister"])
 df_data = load_csv(DATA_FILE)
 df_profiles = load_csv(PROFILE_FILE)
 
+# --- 🛠️ DATA REPAIR SQUAD (The Fix!) ---
+# This block checks if your old data is missing new columns and adds them
+if not df_data.empty:
+    if "meal_type" not in df_data.columns:
+        df_data["meal_type"] = "Log" # Default value
+    if "notes" not in df_data.columns:
+        df_data["notes"] = ""
+    if "calories" not in df_data.columns:
+        df_data["calories"] = 0
+    if "weight" not in df_data.columns:
+        df_data["weight"] = 0.0
+
 if not df_profiles.empty:
     user_profile = df_profiles[df_profiles["user"] == user].iloc[0]
     
@@ -73,7 +86,6 @@ if not df_profiles.empty:
     today_str = datetime.now().strftime("%Y-%m-%d")
     calories_today = 0
     
-    # Filter data for User
     user_history = df_data[df_data["user"] == user].copy() if not df_data.empty else pd.DataFrame()
     
     if not user_history.empty:
@@ -94,11 +106,10 @@ if not df_profiles.empty:
     st.divider()
     tab1, tab2, tab3, tab4 = st.tabs(["📸 Scan/Barcode", "⭐ Favorites", "📝 Manual", "✏️ Edit History"])
 
-    # --- SHARED HELPERS ---
     meal_options = ["Breakfast", "Lunch", "Dinner", "Snack"]
     current_hour = datetime.now().time()
 
-    # --- TAB 1: AI SCANNER (UPDATED) ---
+    # --- TAB 1: AI SCANNER ---
     with tab1:
         st.subheader("Scan Food, Barcode, or Label")
         enable_cam = st.checkbox("Open Camera")
@@ -135,30 +146,33 @@ if not df_profiles.empty:
     # --- TAB 2: FAVORITES ---
     with tab2:
         if not user_history.empty:
-            past_meals = user_history[user_history["calories"] > 0]["notes"].unique()
-            selected_meal = st.selectbox("Select a recent meal:", ["-- Choose --"] + list(past_meals))
-            
-            if selected_meal != "-- Choose --":
-                last_entry = user_history[user_history["notes"] == selected_meal].iloc[-1]
-                with st.form("fav_add"):
-                    f_name = st.text_input("Meal Name", value=selected_meal)
-                    f_cals = st.number_input("Calories", value=int(last_entry["calories"]))
-                    f_type = st.selectbox("Meal Type", meal_options)
-                    f_time = st.time_input("Time Eaten", value=current_hour)
-                    
-                    if st.form_submit_button("Add to Log"):
-                        log_dt = datetime.combine(date.today(), f_time)
-                        new_entry = {
-                            "date": log_dt.strftime("%Y-%m-%d %H:%M"),
-                            "user": user,
-                            "weight": latest_weight,
-                            "calories": f_cals,
-                            "notes": f_name,
-                            "meal_type": f_type
-                        }
-                        updated_data = pd.concat([df_data, pd.DataFrame([new_entry])], ignore_index=True)
-                        save_csv(updated_data, DATA_FILE, f"Added favorite: {f_name}")
-                        st.rerun()
+            # Safely filter for notes that exist
+            valid_history = user_history.dropna(subset=["notes"])
+            if not valid_history.empty:
+                past_meals = valid_history[valid_history["calories"] > 0]["notes"].unique()
+                selected_meal = st.selectbox("Select a recent meal:", ["-- Choose --"] + list(past_meals))
+                
+                if selected_meal != "-- Choose --":
+                    last_entry = user_history[user_history["notes"] == selected_meal].iloc[-1]
+                    with st.form("fav_add"):
+                        f_name = st.text_input("Meal Name", value=selected_meal)
+                        f_cals = st.number_input("Calories", value=int(last_entry["calories"]))
+                        f_type = st.selectbox("Meal Type", meal_options)
+                        f_time = st.time_input("Time Eaten", value=current_hour)
+                        
+                        if st.form_submit_button("Add to Log"):
+                            log_dt = datetime.combine(date.today(), f_time)
+                            new_entry = {
+                                "date": log_dt.strftime("%Y-%m-%d %H:%M"),
+                                "user": user,
+                                "weight": latest_weight,
+                                "calories": f_cals,
+                                "notes": f_name,
+                                "meal_type": f_type
+                            }
+                            updated_data = pd.concat([df_data, pd.DataFrame([new_entry])], ignore_index=True)
+                            save_csv(updated_data, DATA_FILE, f"Added favorite: {f_name}")
+                            st.rerun()
 
     # --- TAB 3: MANUAL ---
     with tab3:
@@ -182,38 +196,35 @@ if not df_profiles.empty:
                 save_csv(updated_data, DATA_FILE, "Manual Log")
                 st.rerun()
 
-    # --- TAB 4: EDIT HISTORY (THE FIX!) ---
+    # --- TAB 4: EDIT HISTORY ---
     with tab4:
         st.subheader("✏️ Edit or Delete Entries")
-        st.info("Double-click any cell to edit it. Select rows and press 'Delete' on your keyboard to remove them.")
+        st.info("To Fix Mistakes: Double-click a cell, change the value, and press Enter. Then click 'Save Changes'.")
         
         if not user_history.empty:
-            # 1. Show the Data Editor (Excel style)
-            # We filter columns to make it cleaner
             editable_cols = ["date", "weight", "calories", "notes", "meal_type"]
             
-            # We use the FULL dataframe for editing, but filter display for the user
-            # This allows us to map changes back to the original database
+            # Sort by date so newest is top
+            display_df = user_history[editable_cols].sort_values("date", ascending=False)
             
             edited_user_df = st.data_editor(
-                user_history[editable_cols].sort_values("date", ascending=False),
-                num_rows="dynamic", # Allows adding/deleting rows
+                display_df,
+                num_rows="dynamic",
                 use_container_width=True,
                 key="editor"
             )
             
             if st.button("💾 Save Changes to Cloud"):
-                # 2. Reconstruct the full database
-                # We take the EDITED user history and combine it with the OTHER user's data
+                # Separate other users' data
                 other_users_data = df_data[df_data["user"] != user]
                 
-                # Add the 'user' column back to the edited data (since we hid it)
+                # Restore the 'user' column to our edited data
                 edited_user_df["user"] = user
                 
-                # Combine
+                # Combine back together
                 final_df = pd.concat([other_users_data, edited_user_df], ignore_index=True)
                 
                 with st.spinner("Saving corrections..."):
                     save_csv(final_df, DATA_FILE, "Edited History")
-                st.success("Changes Saved!")
+                st.success("History Updated!")
                 st.rerun()
